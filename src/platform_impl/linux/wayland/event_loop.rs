@@ -15,6 +15,7 @@ use smithay_client_toolkit::reexports::protocols::unstable::relative_pointer::v1
     zwp_relative_pointer_v1::ZwpRelativePointerV1,
 };
 
+use smithay_client_toolkit::pointer::{ThemeManager, ThemedPointer};
 use smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface;
 
 use crate::{
@@ -75,19 +76,23 @@ impl<T> WindowEventsSink<T> {
 }
 
 pub struct CursorManager {
-    pointer_constraints_proxy: Arc<Mutex<Option<ZwpPointerConstraintsV1>>>,
+    pointer_constraints_proxy: Rc<RefCell<Option<ZwpPointerConstraintsV1>>>,
+    theme_manager: Option<ThemeManager>,
     pointers: Vec<wl_pointer::WlPointer>,
+    themed_pointers: Vec<ThemedPointer>,
     locked_pointers: Vec<ZwpLockedPointerV1>,
-    cursor_visible: Arc<Mutex<bool>>,
+    cursor_visible: Rc<RefCell<bool>>,
 }
 
 impl CursorManager {
-    fn new(constraints: Arc<Mutex<Option<ZwpPointerConstraintsV1>>>) -> CursorManager {
+    fn new(constraints: Rc<RefCell<Option<ZwpPointerConstraintsV1>>>) -> CursorManager {
         CursorManager {
             pointer_constraints_proxy: constraints,
+            theme_manager: None,
             pointers: Vec::new(),
+            themed_pointers: Vec::new(),
             locked_pointers: Vec::new(),
-            cursor_visible: Arc::new(Mutex::new(true)),
+            cursor_visible: Rc::new(RefCell::new(true)),
         }
     }
 
@@ -95,19 +100,29 @@ impl CursorManager {
         self.pointers.push(pointer);
     }
 
-    pub fn set_cursor_visible(&mut self, visible: bool) {
-        // If we want to hide the cursor do it immediately. There is a known
-        // limitation that the cursor will not become visible again until it
-        // enters a new surface
+    fn set_theme_manager(&mut self, theme_manager: ThemeManager) {
+        self.theme_manager = Some(theme_manager);
+    }
+
+    fn set_cursor_visible(&mut self, visible: bool) {
+        self.themed_pointers.clear();
         if !visible {
             for pointer in self.pointers.iter() {
                 pointer.set_cursor(0, None, 0, 0);
             }
+        } else {
+            if let Some(theme_manager) = self.theme_manager.as_ref() {
+                for pointer in self.pointers.iter() {
+                    let themed_pointer = theme_manager.theme_pointer(pointer.clone());
+                    themed_pointer.set_cursor("left_ptr", None).unwrap();
+                    self.themed_pointers.push(themed_pointer);
+                }
+            }
         }
-        (*self.cursor_visible.lock().unwrap()) = visible;
+        (*self.cursor_visible.try_borrow_mut().unwrap()) = visible;
     }
 
-    pub fn grab_pointer(&mut self, surface: Option<&WlSurface>) {
+    fn grab_pointer(&mut self, surface: Option<&WlSurface>) {
         for lp in self.locked_pointers.drain(..) {
             lp.destroy();
         }
@@ -116,7 +131,7 @@ impl CursorManager {
             for pointer in self.pointers.iter() {
                 let locked_pointer = self
                     .pointer_constraints_proxy
-                    .lock()
+                    .try_borrow()
                     .unwrap()
                     .as_ref()
                     .and_then(|pointer_constraints| {
@@ -147,7 +162,7 @@ pub struct EventLoop<T: 'static> {
     sink: Arc<Mutex<WindowEventsSink<T>>>,
     pending_user_events: Rc<RefCell<VecDeque<T>>>,
     // Utility for grabbing the cursor and changing visibility
-    cursor_manager: Arc<Mutex<CursorManager>>,
+    cursor_manager: Rc<RefCell<CursorManager>>,
     _user_source: ::calloop::Source<::calloop::channel::Channel<T>>,
     user_sender: ::calloop::channel::Sender<T>,
     _kbd_source: ::calloop::Source<
@@ -215,7 +230,9 @@ impl<T: 'static> EventLoop<T> {
             })
             .unwrap();
 
-        let pointer_constraints_proxy = Arc::new(Mutex::new(None));
+        let pointer_constraints_proxy = Rc::new(RefCell::new(None));
+        let shm_proxy = Rc::new(RefCell::new(None));
+        let shm_proxy2 = shm_proxy.clone();
 
         let mut seat_manager = SeatManager {
             sink: sink.clone(),
@@ -224,7 +241,7 @@ impl<T: 'static> EventLoop<T> {
             store: store.clone(),
             seats: seats.clone(),
             kbd_sender,
-            cursor_manager: Arc::new(Mutex::new(CursorManager::new(pointer_constraints_proxy))),
+            cursor_manager: Rc::new(RefCell::new(CursorManager::new(pointer_constraints_proxy))),
         };
 
         let cursor_manager = seat_manager.cursor_manager.clone();
@@ -257,8 +274,13 @@ impl<T: 'static> EventLoop<T> {
                             })
                             .unwrap();
 
-                        *seat_manager.pointer_constraints_proxy.lock().unwrap() =
+                        *seat_manager.pointer_constraints_proxy.borrow_mut() =
                             Some(pointer_constraints_proxy);
+                    }
+                    if interface == "wl_shm" {
+                        *shm_proxy2.borrow_mut() = Some(registry
+                            .bind(version, id, move |shm| shm.implement_closure(|_, _| (), ()))
+                            .unwrap());
                     }
                     if interface == "wl_seat" {
                         seat_manager.add_seat(id, version, registry)
@@ -272,6 +294,14 @@ impl<T: 'static> EventLoop<T> {
             },
         )
         .unwrap();
+
+        let theme_manager = shm_proxy.borrow().as_ref().and_then(|shm| {
+            ThemeManager::init(None, env.compositor.clone(), shm).ok()
+        });
+
+        if let Some(theme_manager) = theme_manager {
+            cursor_manager.borrow_mut().set_theme_manager(theme_manager);
+        }
 
         let source = inner_loop
             .handle()
@@ -579,7 +609,7 @@ impl<T> EventLoop<T> {
                     sink.send_window_event(crate::event::WindowEvent::CloseRequested, wid);
                 }
                 if let Some(grab) = cursor_grab {
-                    self.cursor_manager.lock().unwrap().grab_pointer(if grab {
+                    self.cursor_manager.borrow_mut().grab_pointer(if grab {
                         Some(surface)
                     } else {
                         None
@@ -587,10 +617,7 @@ impl<T> EventLoop<T> {
                 }
 
                 if let Some(visible) = cursor_visible {
-                    self.cursor_manager
-                        .lock()
-                        .unwrap()
-                        .set_cursor_visible(visible);
+                    self.cursor_manager.borrow_mut().set_cursor_visible(visible);
                 }
             },
         )
@@ -607,8 +634,8 @@ struct SeatManager<T: 'static> {
     seats: Arc<Mutex<Vec<(u32, wl_seat::WlSeat)>>>,
     kbd_sender: ::calloop::channel::Sender<(crate::event::WindowEvent, super::WindowId)>,
     relative_pointer_manager_proxy: Rc<RefCell<Option<ZwpRelativePointerManagerV1>>>,
-    pointer_constraints_proxy: Arc<Mutex<Option<ZwpPointerConstraintsV1>>>,
-    cursor_manager: Arc<Mutex<CursorManager>>,
+    pointer_constraints_proxy: Rc<RefCell<Option<ZwpPointerConstraintsV1>>>,
+    cursor_manager: Rc<RefCell<CursorManager>>,
 }
 
 impl<T: 'static> SeatManager<T> {
@@ -657,7 +684,7 @@ struct SeatData<T> {
     keyboard: Option<wl_keyboard::WlKeyboard>,
     touch: Option<wl_touch::WlTouch>,
     modifiers_tracker: Arc<Mutex<ModifiersState>>,
-    cursor_manager: Arc<Mutex<CursorManager>>,
+    cursor_manager: Rc<RefCell<CursorManager>>,
 }
 
 impl<T: 'static> SeatData<T> {
@@ -672,12 +699,11 @@ impl<T: 'static> SeatData<T> {
                         self.sink.clone(),
                         self.store.clone(),
                         self.modifiers_tracker.clone(),
-                        self.cursor_manager.lock().unwrap().cursor_visible.clone(),
+                        self.cursor_manager.borrow().cursor_visible.clone(),
                     ));
 
                     self.cursor_manager
-                        .lock()
-                        .unwrap()
+                        .borrow_mut()
                         .register_pointer(self.pointer.as_ref().unwrap().clone());
 
                     self.relative_pointer = self
