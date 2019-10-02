@@ -20,9 +20,9 @@
 - On X11, return dummy monitor data to avoid panicking when no monitors exist.
 - On X11, prevent stealing input focus when creating a new window.
   Only steal input focus when entering fullscreen mode.
-- On Wayland, add support for set_cursor_visible and set_cursor_grab.
 - Added support for set_cursor_visible and set_cursor_grab on wayland
-- On Wayland, fixed DeviceEvents for relative mouse movement is not always produced
+- On Wayland, DeviceEvents for relative mouse movement is not always produced
+- On Wayland, add support for set_cursor_visible and set_cursor_grab.
 
 # 0.20.0 Alpha 3 (2019-08-14)
 
