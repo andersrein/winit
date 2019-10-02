@@ -11,15 +11,19 @@
 - Officially remove the Emscripten backend.
 - On Windows, fix handling of surrogate pairs when dispatching `ReceivedCharacter`.
 - On macOS 10.15, fix freeze upon exiting exclusive fullscreen mode.
+- On X11, allow setting mulitple `XWindowType`s.
 - On iOS, fix null window on initial `HiDpiFactorChanged` event.
 - On Windows, fix fullscreen window shrinking upon getting restored to a normal window.
 - On macOS, fix events not being emitted during modal loops, such as when windows are being resized
   by the user.
 - On Windows, fix hovering the mouse over the active window creating an endless stream of CursorMoved events.
+- On X11, return dummy monitor data to avoid panicking when no monitors exist.
 - On X11, prevent stealing input focus when creating a new window.
   Only steal input focus when entering fullscreen mode.
 - Added support for set_cursor_visible and set_cursor_grab on wayland
 - On Wayland, DeviceEvents for relative mouse movement is not always produced
+- On Wayland, add support for set_cursor_visible and set_cursor_grab.
+- Added support for set_cursor_visible and set_cursor_grab on wayland
 - On Wayland, fixed DeviceEvents for relative mouse movement is not always produced
 
 # 0.20.0 Alpha 3 (2019-08-14)
